@@ -1,0 +1,210 @@
+model supplychain
+    uses "mmsheet", "advmod", "mmrobust", "mmxnlp"
+
+declarations
+    s : set of real !(number of slurry varients)
+    v : set of real !(number of vessels)
+    f : set of real !(number of tank farms)
+    t : set of real !(time horizon)
+    c: dynamic array(v,f) of real !(cost for sending vessel v to tank farm f)
+
+    h: dynamic array(s,f) of real !(inventroy cost of product s at tank farm f per product per day)
+
+    d: dynamic array(s,f,t) of real !(demand for product s at tank farm f in day t)
+    a: dynamic array(v,f) of real !(number of days for vessel v to get to farm f)
+    b: dynamic array(v,f) of real !(number of days for vessel v to go and come bak from tank farm f)
+
+    zmax: array(v) of real !(max capacity of vessel v)
+    zmin: array(v) of real !(min capacity allowed for vessel v)
+
+    Iinit: dynamic array(s,f) of real !(initial inventory of product s at tank farm f)
+    Imax: dynamic array(s,f) of real !(storage capacity for product s at tank farm f)
+    Imin: dynamic array(s,f) of real !(minimum inventory (safety stock) for product s at tank farm f)
+    lt: array(v) of real !(number of hours necessary to load vessel v at the plant)
+    nh: array(t) of real !(number of hours during which vessels can be loaded at the plant in day t)
+
+
+    tindex: array(v,f,t) of real !(holds t-a(v,f))
+    tindex2: array(v,f,t) of real !(holds t+1-b(v,f))
+
+
+
+    y: array(v,f,t) of mpvar !(indicates whether vessel v goes to tank farm f in day t)
+    z: array(s,v,f,t) of mpvar !(quantity of product s shipped with vessel v arriving in day t at tank farm f)
+    w: array(s,v,f,t) of mpvar !(indicates whether product s is shipped with vessel v arriving in day t at tank farm f)
+    I: array(s,f,t) of mpvar  !(amount of product s at tank farm f at the end of day t)
+    obj: nlctr
+end-declarations
+
+initializations from 'mmsheet.xlsx:Assignment22.xlsx'
+    ! just need to initialise s and f value, v and t will be auto-detected when initialise zmax, zmin, lt, nh
+    s as '[slurry$A3:A5]'
+    f as '[tankfarm$A3:A5]'
+
+    [zmax, zmin, lt] as '[vessel$A3:D5]'
+
+    nh as '[time$A3:B5]'
+
+    h as 'partndx;[invcost$A3:D5]'
+    c as 'partndx;[transcost$A3:K19]'
+    a as 'partndx;[daygo$A3:D5]'
+    b as 'partndx;[dayre$A3:D5]'
+
+    d as 'partndx;[demand$A4:G12]'
+
+    Iinit as 'partndx;[initin$A3:D5]'
+    Imin as 'partndx;[mincap$A3:D5]'
+    Imax as 'partndx;[storcap$A3:D5]'
+
+end-initializations
+
+
+(!initializations from 'mmsheet.xlsx:Assignment2.xlsx'    ! initializations for full dataset
+    ! just need to initialise s and f value, v and t will be auto-detected when initialise zmax, zmin, lt, nh
+    s as '[slurry$A3:A18]'
+    f as '[tankfarm$A3:A12]'
+
+    [zmax, zmin, lt] as '[vessel$A3:D19]'
+
+    nh as '[time$A3:B30]'
+
+    h as 'partndx;[invcost$A3:K18]'
+
+    a as 'partndx;[daygo$A3:K19]'
+    b as 'partndx;[dayre$A3:K19]'
+
+    d as 'partndx;[demand$A4:AD163]'
+
+    Iinit as 'partndx;[initin$A3:K18]'
+    Imin as 'partndx;[mincap$A3:K18]'
+    Imax as 'partndx;[storcap$A3:K18]'
+
+end-initializations!)
+
+!constraining indicator variable to being binary (whether vessel v goes to tank farm f in day t)
+forall(V in v, K in f, T in t)
+    y(V,K,T) is_binary
+
+!constraining indicator variable to being binary (whether product s is shipped with vessel v arriving in day t at tank farm f)
+forall(S in s, V in v, K in f, T in t)
+    w(S,V,K,T) is_binary
+
+!procedure copied from class examples used to output solver's status
+procedure print_status
+	declarations
+	status: string
+	end-declarations
+	case getprobstat of
+	XPRS_OPT: status:="Optimum found"
+	XPRS_UNF: status:="Unfinished"
+	XPRS_INF: status:="Infeasible"
+	XPRS_UNB: status:="Unbounded"
+	XPRS_OTH: status:="Failed"
+	else status:="???"
+	end-case
+	writeln("Problem status: ", status)
+end-procedure
+
+!objective function
+! non-linear objective function
+objective:= sum(S in s, V in v, K in f, T in t) c(V,K)*y(V,K,T)/z(S,V,K,T)*d(S,K,T) + sum(S in s, K in f, T in t) h(S,K)*I(S,K,T)
+! linear objective function
+!objective:= sum(S in s, V in v, K in f, T in t) c(V,K)*y(V,K,T) + sum(S in s, K in f, T in t) h(S,K)*I(S,K,T)
+obj:= objective
+
+!inventory balance equation
+forall(S in s, K in f, T in t)
+    if T=1 then
+        sum(V in v) z(S,V,K,T) - I(S,K,T) + Iinit(S,K) = d(S,K,T)          ! first day must calculate the initial inventory
+    else
+        sum(V in v) z(S,V,K,T) - I(S,K,T) + I(S,K,T-1) = d(S,K,T)
+    end-if
+
+!initialise inventory amounts at beginning of time horizon
+!forall(S in s, K in f)
+   ! I(S,K,1) = Iinit(S,K)
+
+!inventories for product s tank farm f must be less than storage capacity in each day
+forall(S in s, K in f, T in t)
+    I(S,K,T) <= Imax(S,K)
+
+!inventories for product s at tank farm f cannot be less than the safety stock in each day
+forall(S in s, K in f, T in t)
+    I(S,K,T) >= Imin(S,K)
+
+!array to store T-a(V,K)
+forall(V in v, K in f,T in t)
+    tindex(V,K,T):= T-a(V,K)
+
+!total quantity transported by a vessel is not higher than the capacity of the vessel
+forall(V in v, K in f, T in t | tindex(V,K,T) >= 1 and tindex(V,K,T)=T)
+  sum(S in s) z(S,V,K,T) <= zmax(V)*y(V,K,T)
+
+!guarentees minimum capacity of vessel v is reached
+forall(S in s, V in v, K in f, T in t)
+    z(S,V,K,T) >= zmin(V)*w(S,V,K,T)
+
+!forces variable z (quantity of product s shipped with vessel v arriving in day t at tank farm f) to 0 if
+! w (indicates whether product s is shipped with vessel v arriving in day t at tank farm f) is 0
+forall(S in s, V in v, K in f, T in t)
+    z(S,V,K,T) <= zmax(V)*w(S,V,K,T)
+
+!array to store T+1-b(V,K)
+forall(V in v, K in f,T in t)
+    tindex2(V,K,T):= T+1-b(V,K)
+
+!ensures vessel v cannot be sent to more than one tank farm f
+forall(V in v, T in t)
+    sum(K in f, L in t | tindex2(V,K,L) >= 1) y(V,K,L) <= 1
+
+!constrains maximum number of hours loading products at plant quay per day
+forall(T in t)
+    constr:=sum(V in v, K in f) lt(V)*y(V,K,T) <= nh(T)
+
+!links indicator variables y and w whereby a product s shipped on vessel v arriving on day t at tank farm k
+! means vessel v actually leaves from the factory for tank farm k on day t−a(V,K)
+forall(S in s, V in v, K in f, T in t | tindex(V,K,T) >= 1 and tindex(V,K,T)=T)
+        y(V,K,T) >= w(S,V,K,T)
+
+!non-negatitvity constraint for quantity of product s shipped with vessel v arriving in day t at tank farm f
+forall(S in s, V in v, K in f, T in t)
+    z(S,V,K,T) >= 0
+
+!non-negatitvity constraint amount of product s at tank farm f at the end of day t
+forall(S in s, K in f, T in t)
+    I(S,K,T) >= 0
+
+
+minimize(obj)
+
+writeln("")
+
+! check status of solver
+print_status
+
+writeln("Minimal sum of transportation and inventory costs:  ", getobjval)          ! Solution printing
+writeln("")
+
+forall(S in s, V in v, K in f, T in t)
+    if (getsol( z(S,V,K,T) ) > 0) then
+        writeln( getsol( z(S,V,K,T) )," of product ", S, " is shipped by vessel ", V, " to tank farm ", K, " on day ", T)
+    end-if
+
+writeln("")
+
+ (!writeln("Reduced cost of the amount of product 1 shipped by vessel 2 to tank farm 4 on day 1 is:  ", getrcost( z(1,2,4,1)  ))
+ upsensrang := getsensrng(XPRS_UP, z(1,2,4,1))
+ writeln("Upper sensitivity range of the amount of product 1 shipped by vessel 2 to tank farm 4 on day 1 is:  ", upsensrang)
+ dwnsensrang := getsensrng(XPRS_DN, z(1,2,4,1))
+ writeln("Lower sensitivity range of the amount of product 1 shipped by vessel 2 to tank farm 4 on day 1 is:  ", dwnsensrang)
+
+ writeln("")!)
+
+  mydual:= getdual( constr )
+  writeln( "Shadow Price of maximum number of hours loading products at plant quay per day is: ", mydual )
+  slack := getslack( constr )
+  writeln( "Slack of maximum number of hours loading products at plant quay per day is: ", slack )
+
+
+
+end-model
